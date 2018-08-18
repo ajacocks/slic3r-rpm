@@ -1,0 +1,114 @@
+- name: Automatically generate RPMs from Slic3r downloads
+  hosts: localhost
+  vars:
+  - arch: "linux64"
+  - archiveURL: ""
+  - version: "current"
+  - downloadURL: "https://github.com/prusa3d/Slic3r/releases/download/"
+  - releaseURL: "https://github.com/prusa3d/Slic3r/releases/latest"
+  - rpmTools:
+    - rpm-build
+    - rpmdevtools
+
+  tasks:
+  - name: install required rpm development tools
+    package:
+      name: "{{ item }}"
+      state: latest
+    with_items: "{{ rpmTools }}"
+    become: yes
+
+  - name: create rpm development tree in user home directory
+    command: rpmdev-setuptree
+
+  - name: create temp working directory
+    tempfile:
+      state: directory
+      prefix: "Slic3rPE."
+    register: tempdir
+
+  - name: get the latest release info from github
+    get_url:
+      url: "{{ releaseURL }}"
+      dest: "{{ tempdir.path }}/latest"
+
+  - name: register the contents
+    slurp:
+      src: "{{ tempdir.path }}/latest"
+    register: releaseFile
+
+  - name: set the release variable
+    set_fact:
+      version: "{{ releaseFile.content | b64decode | regex_search('<title>.*</title>') | regex_replace('^<title>Release Slic3r ','') | regex_replace(' .*$','') }}"
+    when: version == "current"
+
+  - name: set the archiveURL variable
+    set_fact:
+      archiveURL: "{{ releaseFile.content | b64decode | regex_search('<a href=.*Slic3rPE.*tar.bz2') | regex_replace('^<a href=\"','https://github.com') }}"
+
+  - debug:
+      var: version
+
+  - debug:
+      var: archiveURL
+
+  - name: get the latest release archive from GitHub
+    get_url:
+      url: "{{ archiveURL }}"
+      dest: "{{ tempdir.path }}/Slic3rPE-{{ version }}_linux_{{ arch }}.tar.bz2"
+
+  - name: create source archive build directory
+    file:
+      path: "{{ tempdir.path }}/Slic3rPE-{{ version }}"
+      state: directory
+
+  - name: extract terraform zipfile to build directory
+    unarchive:
+      src: "{{ tempdir.path }}/Slic3rPE-{{ version }}_linux_{{ arch }}.tar.bz2"
+      dest: "{{ tempdir.path }}/Slic3rPE-{{ version }}/"
+
+  - name: get the docs from github
+    get_url:
+      url: "{{ item.src }}"
+      dest: "{{ tempdir.path }}/Slic3rPE-{{ version }}/{{ item.name }}"
+    with_items:
+    - { name: "How to build - UNIX.md", src: "https://raw.githubusercontent.com/prusa3d/Slic3r/master/doc/How%20to%20build%20-%20UNIX.md" }
+    - { name: "How to build - Windows.md", src: "https://raw.githubusercontent.com/prusa3d/Slic3r/master/doc/How%20to%20build%20-%20Windows.md" }
+    - { name: "How_to_build_Slic3r.txt", src: "https://raw.githubusercontent.com/prusa3d/Slic3r/master/doc/How_to_build_Slic3r.txt" }
+    - { name: "Localization_guide.md", src: "https://raw.githubusercontent.com/prusa3d/Slic3r/master/doc/Localization_guide.md" }
+    - { name: "LICENSE", src: "https://raw.githubusercontent.com/prusa3d/Slic3r/master/LICENSE" }
+    - { name: "README.md", src: "https://raw.githubusercontent.com/prusa3d/Slic3r/master/README.md" }
+
+  - name: create the new source archive
+    archive:
+      path: "{{ tempdir.path }}/Slic3rPE-{{ version }}"
+      dest: "{{ ansible_env.HOME }}/rpmbuild/SOURCES/Slic3rPE-{{ version }}.tar"
+      format: tar
+
+  - shell: /bin/false
+
+  - name: remove temp directory
+    file:
+      path: "{{ tempdir.path }}"
+      state: absent
+  - name: remove existing spec files
+    file:
+      path: "{{ ansible_env.HOME }}/rpmbuild/SPECS/terraform-{{ version }}.spec"
+      state: absent
+  - name: create spec file from template
+    template:
+      src: terraform.spec.j2
+      dest: "{{ ansible_env.HOME }}/rpmbuild/SPECS/terraform-{{ version }}.spec"
+  - name: build rpm
+    command: "rpmbuild -bb {{ ansible_env.HOME }}/rpmbuild/SPECS/terraform-{{ version }}.spec"
+    register: rpmbuild
+  - name: set the rpm file variable
+    set_fact:
+      rpmFile: "{{ rpmbuild.stdout_lines.8 | regex_replace('^Wrote: ','') }}"
+  - debug:
+      var: rpmFile
+  - name: install terraform
+    package:
+      name: "{{ rpmFile }}"
+      state: latest
+    become: true
